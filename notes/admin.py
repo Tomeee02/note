@@ -1,3 +1,4 @@
 from django.contrib import admin
+from .models import Note  # Importáljuk a Note modellt
 
-# Register your models here.
+admin.site.register(Note)  # Regisztráljuk az admin felületen
