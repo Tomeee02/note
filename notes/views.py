@@ -15,8 +15,7 @@ class NoteViewSet(viewsets.ModelViewSet):
     queryset = Note.objects.all()  # Itt definiáljuk a querysetet
     serializer_class = NoteSerializer
     permission_classes = [permissions.IsAuthenticated]  # Csak bejelentkezett felhasználók
-
-    def get_queryset(self):
+    def get_queryset(self): 
         return Note.objects.filter(user=self.request.user)  # Csak saját jegyzetek
 
     def perform_create(self, serializer):
