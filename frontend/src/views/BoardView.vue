@@ -21,7 +21,17 @@
     <div style="flex: 1; padding-left: 16px;">
       <section>
         <div v-for="note in notes" :key="note.id" class="sticky-note" :style="{ left: note.position_x + 'px', top: note.position_y + 'px', background: note.background_color, color: note.text_color, width: note.width + 'px', height: note.height + 'px', borderColor: note.background_color}" @mousedown="startDrag(note, $event)" @click="selectedNote = note">
-          <div>{{ note.content }}</div>
+          <div v-if="!note.editing" @dblclick="note.editing = true">
+            {{ note.content }}
+          </div>
+          <!-- Szerkesztés textarea-ban -->
+          <textarea
+            v-else
+            v-model="note.content"
+            @blur="finishEdit(note)"
+            @keyup.enter.exact.prevent="finishEdit(note)"
+            class="note-editor"
+          />
           <!-- Sizing corner -->
           <div class="resizer" @mousedown.stop="startResize(note, $event)" ></div>
         </div>
@@ -64,6 +74,14 @@ const startBoardDrag = (child, event) => {
   window.addEventListener('mouseup', stopBoardDrag)
 }
 
+const finishEdit = async (note) => {
+  note.editing = false
+  await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
+    content: note.content
+  })
+}
+
+
 const onBoardDrag = (event) => {
   if (!draggedBoard) return
   draggedBoard.position_x = event.clientX - boardOffsetX
@@ -89,7 +107,10 @@ onMounted(async () => {
   console.log('Kapott board:', board.value) 
 
   const notesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
-  notes.value = notesRes.data.filter(note => note.board === board.value.id)
+  notes.value = notesRes.data
+  .filter(n => n.board === board.value.id)
+  .map(n => ({ ...n, editing: false }))
+
 
   const boardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
   children.value = boardsRes.data.filter(b => b.parent === board.value.id)
@@ -243,6 +264,18 @@ const startResize = (note, event) => {
  .topbar-left {
      color: #333;
 }
+.note-editor {
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  font: inherit;
+  background: transparent;
+  padding: 0;
+  box-sizing: border-box;
+}
+
  .topbar-right {
      display: flex;
      align-items: center;
