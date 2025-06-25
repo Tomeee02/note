@@ -7,20 +7,33 @@
   </nav>
   <div style="display: flex;">
     <div class="toolbar">
-      <div class="toolbar">
-    <div class="template-icon" title="Új jegyzet" @click="createNote()">📝</div>
-    <div class="template-icon" title="Új board" @click="createBoard()">📁</div>
-    <div class="template-icon" title="Új dokumentum" @click="createDocument()">📄</div>
-  </div>
-
-    <div v-if="selectedNote" class="color-tools">
-      <input type="color" v-model="selectedNote.background_color" @change="updateNoteStyle(selectedNote)" title="Háttérszín" />
-    </div>
+      <div>
+        <div class="template-icon" title="Új jegyzet" @click="createNote()">📝</div>
+        <div class="template-icon" title="Új board" @click="createBoard()">📁</div>
+        <div class="template-icon" title="Új dokumentum" @click="createDocument()">📄</div>
+      </div>
+      <div v-if="selectedNote" class="color-tools">
+        <input type="color" v-model="selectedNote.background_color" @change="updateNoteStyle(selectedNote)" title="Háttérszín" />
+        <input type="color" v-model="selectedNote.text_color" @change="updateNoteStyle(selectedNote)" title="Betűszín" />
+      </div>
+      <div v-if="selectedBoard" class="emoji-panel">
+        <h4>📁 Ikon kiválasztása</h4>
+        <div class="emoji-grid">
+          <span
+            v-for="icon in availableIcons"
+            :key="icon"
+            :class="{ selected: icon === selectedBoard.emoji }"
+            @click="updateBoardIcon(selectedBoard, icon)"
+          >
+            {{ icon }}
+          </span>
+        </div>
+      </div>
     </div>
     <!-- Main -->
     <div style="flex: 1; padding-left: 16px;">
       <section>
-        <div v-for="note in notes" :key="note.id" class="sticky-note" :style="{ left: note.position_x + 'px', top: note.position_y + 'px', background: note.background_color, color: note.text_color, width: note.width + 'px', height: note.height + 'px', borderColor: note.background_color}" @mousedown="startDrag(note, $event)" @click="selectedNote = note">
+        <div v-for="note in notes" :key="note.id" class="sticky-note" draggable="true" @dragstart="onNoteDragStart(note)" :style="{ left: note.position_x + 'px', top: note.position_y + 'px', background: note.background_color, color: note.text_color, width: note.width + 'px', height: note.height + 'px', borderColor: note.background_color}" @mousedown="startDrag(note, $event)" @click="selectedNote = note">
           <div v-if="!note.editing" @dblclick="note.editing = true">
             {{ note.content }}
           </div>
@@ -41,7 +54,10 @@
           class="board-card" 
           :style="{ left: child.position_x + 'px', top: child.position_y + 'px', width: '65px', height: '65px' }" 
           @mousedown="startBoardDrag(child, $event)" 
-          @dblclick="$router.push(`/boards/${child.id}`)">
+          @dblclick="$router.push(`/boards/${child.id}`)"
+          @dragover.prevent
+          @click="selectedBoard = child"
+          @drop="handleNoteDropOnBoard($event, child)">
           <div class="emoji">{{ child.emoji }}</div>
         </div>
       </section>
@@ -50,42 +66,165 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 
-const availableIcons = ["📄", "📝", "📦", "📁", "⚙️", "✅", "🧠", "🚀", "🎯"]
-const selectedIcon = ref("📄")
-const route = useRoute()                 // URL paramétereket kapunk
-const board = ref({})                   // Reaktív objektum a board adatnak
-const notes = ref([])                   // Jegyzetek tömbje
-const children = ref([])                // Alboardok tömbje
+const route = useRoute()
+const router = useRouter()
 
+// 📚 Állapotok
+const board = ref({})
+const notes = ref([])
+const children = ref([])
+const selectedNote = ref(null)
+const selectedBoard = ref(null)
+
+// 🎨 Színek + ikonok
+const availableIcons = [
+  "📄", "📝", "📦", "📁", "⚙️", "✅", "🧠", "🚀", "🎯",
+  "🗃️", "🗂️", "🗄️", "💡", "✏️", "🖋️", "📒", "🧾", "📌", "📅",
+  "📈", "⏳", "🔁", "🕒", "☑️", "🔒", "📥", "📤", "🎨", "🌈", "🧱", "🧩", "🔧", "🧰", "🖥️"
+]
+
+// 📌 Snap to grid
+const gridSize = 20
+const snapToGrid = (value) => Math.round(value / gridSize) * gridSize
+
+// 📍 Emoji menü jobb klikkre
+const emojiMenu = ref({
+  visible: false,
+  x: 0,
+  y: 0,
+  board: null
+})
+onMounted(async () => {
+  const boardId = route.params.id
+  const boardRes = await axios.get(`http://127.0.0.1:8000/api/boards/${boardId}/`)
+  board.value = boardRes.data
+
+  const notesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
+  notes.value = notesRes.data
+    .filter(n => n.board === board.value.id)
+    .map(n => ({ ...n, editing: false }))
+
+  const boardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
+  children.value = boardsRes.data.filter(b => b.parent === board.value.id)
+
+  window.addEventListener('keydown', handleKeyDown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleKeyDown)
+})
+
+const handleKeyDown = async (e) => {
+  if (e.key === 'Delete' && selectedNote.value) {
+    const confirmDelete = confirm('Biztosan törlöd a kijelölt jegyzetet?')
+    if (!confirmDelete) return
+    await axios.delete(`http://127.0.0.1:8000/api/notes/${selectedNote.value.id}/`)
+    notes.value = notes.value.filter(n => n.id !== selectedNote.value.id)
+    selectedNote.value = null
+  }
+}
+
+const createNote = async () => {
+  const res = await axios.post('http://127.0.0.1:8000/api/notes/', {
+    board: board.value.id,
+    content: 'Új jegyzet',
+    position_x: snapToGrid(100),
+    position_y: snapToGrid(100),
+    background_color: '#fff8b3',
+    text_color: '#000',
+    width: 160,
+    height: 100
+  })
+  notes.value.push({ ...res.data, editing: true })
+}
+
+const createBoard = async () => {
+  const res = await axios.post('http://127.0.0.1:8000/api/boards/', {
+    title: 'Új board',
+    parent: board.value.id || null,
+    user: board.value.user,
+    emoji: "📁",
+    position_x: snapToGrid(200),
+    position_y: snapToGrid(150)
+  })
+  children.value.push(res.data)
+}
+
+const createDocument = async () => {
+  await axios.post('http://127.0.0.1:8000/api/documents/', {
+    board: board.value.id,
+    title: 'Új dokumentum',
+    content: ''
+  })
+  alert('📄 Új dokumentum létrehozva!')
+}
+
+const updateNoteStyle = async (note) => {
+  await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
+    background_color: note.background_color,
+    text_color: note.text_color
+  })
+}
+
+const updateBoardIcon = async (boardObj, icon) => {
+  boardObj.emoji = icon
+  await axios.patch(`http://127.0.0.1:8000/api/boards/${boardObj.id}/`, {
+    emoji: icon
+  })
+}
+// 🎯 Jegyzet mozgatás (egérrel)
+const draggedNote = ref(null)
+const offset = { x: 0, y: 0 }
+
+const onNoteDragStart = (note) => {
+  draggedNote.value = note
+}
+
+const startDrag = (note, e) => {
+  draggedNote.value = note
+  offset.x = e.clientX - note.position_x
+  offset.y = e.clientY - note.position_y
+  window.addEventListener('mousemove', onDrag)
+  window.addEventListener('mouseup', stopDrag)
+}
+
+const onDrag = (e) => {
+  if (!draggedNote.value) return
+  draggedNote.value.position_x = snapToGrid(e.clientX - offset.x)
+  draggedNote.value.position_y = snapToGrid(e.clientY - offset.y)
+}
+
+const stopDrag = async () => {
+  if (!draggedNote.value) return
+  await axios.patch(`http://127.0.0.1:8000/api/notes/${draggedNote.value.id}/`, {
+    position_x: draggedNote.value.position_x,
+    position_y: draggedNote.value.position_y
+  })
+  draggedNote.value = null
+  window.removeEventListener('mousemove', onDrag)
+  window.removeEventListener('mouseup', stopDrag)
+}
+
+// 📁 Board mozgatás (ugyanez boardokra)
 let draggedBoard = null
-let boardOffsetX = 0
-let boardOffsetY = 0
+let boardOffset = { x: 0, y: 0 }
 
-const startBoardDrag = (child, event) => {
+const startBoardDrag = (child, e) => {
   draggedBoard = child
-  boardOffsetX = event.clientX - child.position_x
-  boardOffsetY = event.clientY - child.position_y
-
+  boardOffset.x = e.clientX - child.position_x
+  boardOffset.y = e.clientY - child.position_y
   window.addEventListener('mousemove', onBoardDrag)
   window.addEventListener('mouseup', stopBoardDrag)
 }
 
-const finishEdit = async (note) => {
-  note.editing = false
-  await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
-    content: note.content
-  })
-}
-
-
-const onBoardDrag = (event) => {
+const onBoardDrag = (e) => {
   if (!draggedBoard) return
-  draggedBoard.position_x = event.clientX - boardOffsetX
-  draggedBoard.position_y = event.clientY - boardOffsetY
+  draggedBoard.position_x = snapToGrid(e.clientX - boardOffset.x)
+  draggedBoard.position_y = snapToGrid(e.clientY - boardOffset.y)
 }
 
 const stopBoardDrag = async () => {
@@ -98,118 +237,39 @@ const stopBoardDrag = async () => {
   window.removeEventListener('mousemove', onBoardDrag)
   window.removeEventListener('mouseup', stopBoardDrag)
 }
-
-onMounted(async () => {
-  const boardId = route.params.id       // pl. "1" ha az URL /boards/1
-  const boardRes = await axios.get(`http://127.0.0.1:8000/api/boards/${boardId}/`)
-  board.value = boardRes.data
-
-  console.log('Kapott board:', board.value) 
-
-  const notesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
-  notes.value = notesRes.data
-  .filter(n => n.board === board.value.id)
-  .map(n => ({ ...n, editing: false }))
-
-
-  const boardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
-  children.value = boardsRes.data.filter(b => b.parent === board.value.id)
-
-  console.log('Route param id:', route.params.id)
-  console.log('Kapott board:', board.value)
-  console.log('Jegyzetek:', notes.value)
-  console.log('Gyerek boardok:', children.value)
-})
-
-const createNote = async () => {
-  if (!board.value.id) return
-  const res = await axios.post('http://127.0.0.1:8000/api/notes/', {
-    board: board.value.id,
-    content: 'Új jegyzet',
-    position_x: 100,
-    position_y: 100
+// 🧲 Jegyzet áthelyezése másik board-ra
+const handleNoteDropOnBoard = async (e, targetBoard) => {
+  if (!draggedNote.value || !targetBoard) return
+  await axios.patch(`http://127.0.0.1:8000/api/notes/${draggedNote.value.id}/`, {
+    board: targetBoard.id
   })
-  notes.value.push(res.data)
+  notes.value = notes.value.filter(n => n.id !== draggedNote.value.id)
+  draggedNote.value = null
 }
 
-const createBoard = async () => {
-  const res = await axios.post('http://127.0.0.1:8000/api/boards/', {
-    title: 'Új board',
-    parent: board.value.id || null,
-    user: board.value.user,  // vagy helyette egy fix user azonosító
-    emoji: selectedIcon.value
-  })
-  children.value.push(res.data)
-}
-
-const createDocument = async () => {
-  const res = await axios.post('http://127.0.0.1:8000/api/documents/', {
-    title: 'Új dokumentum',
-    content: '',
-    board: board.value.id
-  })
-  alert('📄 Új dokumentum létrehozva!')
-}
-let draggedNote = null
-let offsetX = 0
-let offsetY = 0
-
-const startDrag = (note, event) => {
-  draggedNote = note
-  offsetX = event.clientX - note.position_x
-  offsetY = event.clientY - note.position_y
-  window.addEventListener('mousemove', onDrag)
-  window.addEventListener('mouseup', stopDrag)
-}
-
-const onDrag = (event) => {
-  if (!draggedNote) return
-  draggedNote.position_x = event.clientX - offsetX
-  draggedNote.position_y = event.clientY - offsetY
-}
-
-const stopDrag = async () => {
-  if (!draggedNote) return
-
-  // Mentés az API-ba (opcionális)
-  await axios.patch(`http://127.0.0.1:8000/api/notes/${draggedNote.id}/`, {
-    position_x: draggedNote.position_x,
-    position_y: draggedNote.position_y
-  })
-
-  draggedNote = null
-  window.removeEventListener('mousemove', onDrag)
-  window.removeEventListener('mouseup', stopDrag)
-}
-  const selectedNote = ref(null)
-
-const updateNoteStyle = async (note) => {
+// 🖊️ Szerkesztés dupla kattintásra
+const finishEdit = async (note) => {
+  note.editing = false
   await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
-    background_color: note.background_color,
-    text_color: note.text_color
+    content: note.content
   })
 }
-const openSettings = () => {
-  alert('Beállítások még nem készültek el – de dolgozhatunk rajta 😉')
-}
-const startResize = (note, event) => {
-  const startX = event.clientX
-  const startY = event.clientY
+
+// ↔️ Jegyzet méretezése
+const startResize = (note, e) => {
+  const startX = e.clientX
+  const startY = e.clientY
   const startWidth = note.width || 160
   const startHeight = note.height || 100
 
-  const onMouseMove = (e) => {
-    const newWidth = Math.max(100, startWidth + (e.clientX - startX))
-    const newHeight = Math.max(80, startHeight + (e.clientY - startY))
-    note.width = newWidth
-    note.height = newHeight
+  const onMouseMove = (ev) => {
+    note.width = Math.max(100, startWidth + (ev.clientX - startX))
+    note.height = Math.max(80, startHeight + (ev.clientY - startY))
   }
 
   const onMouseUp = async () => {
     window.removeEventListener('mousemove', onMouseMove)
     window.removeEventListener('mouseup', onMouseUp)
-
-    // Mentés backendre
     await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
       width: note.width,
       height: note.height
@@ -219,7 +279,42 @@ const startResize = (note, event) => {
   window.addEventListener('mousemove', onMouseMove)
   window.addEventListener('mouseup', onMouseUp)
 }
-</script> <style scoped> 
+
+// 🎯 Emoji panel jobb klikkre
+const openEmojiMenu = (e, boardObj) => {
+  emojiMenu.value = {
+    visible: true,
+    x: e.clientX,
+    y: e.clientY,
+    board: boardObj
+  }
+}
+
+const selectBoardIcon = async (icon) => {
+  const boardToUpdate = emojiMenu.value.board
+  if (!boardToUpdate) return
+  boardToUpdate.emoji = icon
+  await axios.patch(`http://127.0.0.1:8000/api/boards/${boardToUpdate.id}/`, {
+    emoji: icon
+  })
+  emojiMenu.value.visible = false
+}
+
+// ⌨️ Bezárás ESC-re
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    emojiMenu.value.visible = false
+  }
+})
+
+const openSettings = () => {
+  alert('⚙️ Beállítások még nincsenek – de dolgozhatunk rajta 😄')
+}
+</script>
+
+
+
+ <style scoped> 
 .sticky-note {
      position: absolute;
      min-width: 100px;
@@ -261,6 +356,41 @@ const startResize = (note, event) => {
      font-size: 15px;
      z-index: 1000;
 }
+.emoji-panel {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 10px;
+  padding: 12px 16px;
+  width: 180px;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.emoji-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.emoji-grid span {
+  font-size: 24px;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  transition: background 0.2s;
+}
+
+.emoji-grid span.selected {
+  background: #f0f0f0;
+  box-shadow: inset 0 0 0 2px #666;
+}
+
  .topbar-left {
      color: #333;
 }
@@ -353,11 +483,12 @@ const startResize = (note, event) => {
      font-size: 36px;
      cursor: grab;
      user-select: none;
+     display: flex;
+    flex-direction: column;
 }
  .emoji {
      font-size: 36px;
      text-align: center;
-     margin-top: 18px;
 }
  .template-icon {
      font-size: 28px;
