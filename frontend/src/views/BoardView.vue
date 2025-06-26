@@ -1,39 +1,100 @@
 <template>
   <nav class="topbar">
-    <div class="topbar-left">{{ board.title }}</div>
+    <div class="topbar-left">
+      <template v-if="board && board.id">
+        <template v-for="(b, index) in boardAncestors" :key="b.id">
+          <span
+            class="breadcrumb-link"
+            @click="goToBoard(b.id)"
+            :style="{ cursor: b.id !== board.id ? 'pointer' : 'default' }"
+          >
+            {{ b.emoji }} {{ b.title }}
+          </span>
+          <span v-if="index < boardAncestors.length - 1"> › </span>
+        </template>
+      </template>
+    </div>
     <div class="topbar-right">
       <button class="settings-btn" @click="openSettings">⚙️</button>
     </div>
   </nav>
-  <div style="display: flex;">
+  <div style="display: flex">
     <div class="toolbar">
-      <div>
-        <div class="template-icon" title="Új jegyzet" @click="createNote()">📝</div>
-        <div class="template-icon" title="Új board" @click="createBoard()">📁</div>
-        <div class="template-icon" title="Új dokumentum" @click="createDocument()">📄</div>
-      </div>
-      <div v-if="selectedNote" class="color-tools">
-        <input type="color" v-model="selectedNote.background_color" @change="updateNoteStyle(selectedNote)" title="Háttérszín" />
-        <input type="color" v-model="selectedNote.text_color" @change="updateNoteStyle(selectedNote)" title="Betűszín" />
-      </div>
-      <div v-if="selectedBoard" class="emoji-panel">
-        <h4>📁 Ikon kiválasztása</h4>
-        <div class="emoji-grid">
-          <span
+      <!-- Ha nincs semmi kijelölve -->
+      <template v-if="selectedNotes.length === 0 && selectedBoards.length === 0">
+        <div class="template-icon" @click="createNote" title="Új jegyzet">📝</div>
+        <div class="template-icon" @click="createBoard" title="Új board">📁</div>
+        <div class="template-icon" @click="createDocument" title="Új dokumentum">📄</div>
+      </template>
+      <!-- Ha note van kijelölve -->
+      <template v-else-if="selectedNotes.length > 0">
+        <input
+          type="color"
+          :value="selectedNotes[0].background_color"
+          @input="
+            (e) => {
+              selectedNotes.forEach((note) => (note.background_color = e.target.value))
+            }
+          "
+          @change="
+            (e) => {
+              selectedNotes.forEach((note) => updateNoteStyle(note))
+            }
+          "
+          title="Háttérszín"
+        />
+        <input
+          type="color"
+          :value="selectedNotes[0].text_color"
+          @input="
+            (e) => {
+              selectedNotes.forEach((note) => (note.text_color = e.target.value))
+            }
+          "
+          @change="
+            (e) => {
+              selectedNotes.forEach((note) => updateNoteStyle(note))
+            }
+          "
+          title="Szövegszín"
+        />
+      </template>
+
+      <!-- Ha board van kijelölve -->
+      <template v-else-if="selectedBoards.length > 0">
+        <div class="icon-picker">
+          <div
             v-for="icon in availableIcons"
             :key="icon"
-            :class="{ selected: icon === selectedBoard.emoji }"
-            @click="updateBoardIcon(selectedBoard, icon)"
+            :class="['emoji-option', { selected: icon === selectedBoards[0].emoji }]"
+            @click="updateBoardIcon(selectedBoards[0], icon)"
+            :title="icon"
           >
             {{ icon }}
-          </span>
+          </div>
         </div>
-      </div>
+      </template>
     </div>
     <!-- Main -->
-    <div style="flex: 1; padding-left: 16px;">
+    <div style="flex: 1; padding-left: 16px">
       <section>
-        <div v-for="note in notes" :key="note.id" class="sticky-note" draggable="true" @dragstart="onNoteDragStart(note)" :style="{ left: note.position_x + 'px', top: note.position_y + 'px', background: note.background_color, color: note.text_color, width: note.width + 'px', height: note.height + 'px', borderColor: note.background_color}" @mousedown="startDrag(note, $event)" @click="selectedNote = note">
+        <div
+          v-for="note in notes"
+          :key="note.id"
+          class="sticky-note"
+          :class="{ selected: selectedNotes.some((n) => n.id === note.id) }"
+          :style="{
+            left: note.position_x + 'px',
+            top: note.position_y + 'px',
+            background: note.background_color,
+            color: note.text_color,
+            width: note.width + 'px',
+            height: note.height + 'px',
+            borderColor: note.background_color,
+          }"
+          @mousedown.stop="startDrag(note, $event)"
+          @click.stop="(e) => toggleNoteSelection(note, e)"
+        >
           <div v-if="!note.editing" @dblclick="note.editing = true">
             {{ note.content }}
           </div>
@@ -46,19 +107,40 @@
             class="note-editor"
           />
           <!-- Sizing corner -->
-          <div class="resizer" @mousedown.stop="startResize(note, $event)" ></div>
+          <div class="resizer" @mousedown.stop="startResize(note, $event)"></div>
         </div>
-        <div 
-          v-for="child in children" 
-          :key="child.id" 
-          class="board-card" 
-          :style="{ left: child.position_x + 'px', top: child.position_y + 'px', width: '65px', height: '65px' }" 
-          @mousedown="startBoardDrag(child, $event)" 
-          @dblclick="$router.push(`/boards/${child.id}`)"
-          @dragover.prevent
-          @click="selectedBoard = child"
-          @drop="handleNoteDropOnBoard($event, child)">
-          <div class="emoji">{{ child.emoji }}</div>
+        <div
+          v-for="child in children"
+          :key="child.id"
+          class="board-wrapper"
+          @click.stop="(e) => toggleBoardSelection(child, e)"
+          :class="['board-wrapper', { selected: selectedBoards.some((b) => b.id === child.id) }]"
+          :style="{ left: child.position_x + 'px', top: child.position_y + 'px' }"
+          @mousedown.stop="startBoardDrag(child, $event)"
+          @contextmenu.prevent="openEmojiMenu($event, child)"
+          @dblclick.stop="goToBoard(child.id)"
+        >
+          <div class="board-card">
+            <div class="emoji">{{ child?.emoji }}</div>
+          </div>
+
+          <div v-if="!child.editing" class="board-label" @dblclick.stop="startEditTitle(child)">
+            {{ child.title }}
+          </div>
+          <input
+            v-else
+            class="board-title-input"
+            v-model="child.title"
+            :ref="(el) => (titleInputs[child.id] = el)"
+            @blur="saveBoardTitle(child)"
+            @keyup.enter="saveBoardTitle(child)"
+            @keyup.esc="cancelEditTitle(child)"
+          />
+          <div class="board-meta">
+            <span>{{ getNoteCount(child.id) }} 📝</span>
+            <span>{{ getChildBoardCount(child.id) }} 📁</span>
+            <span>{{ getFileCount(child.id) }} 📄</span>
+          </div>
         </div>
       </section>
     </div>
@@ -66,6 +148,15 @@
 </template>
 
 <script setup>
+const titleInputs = {}
+const selectedNotes = ref([])
+const selectedBoards = ref([])
+const allNotes = ref([])
+const allBoards = ref([])
+const getNoteCount = (id) => allNotes.value.filter((n) => n.board == id).length
+const getChildBoardCount = (id) => allBoards.value.filter((b) => b.parent == id).length
+const getFileCount = (id) => 0 // majd jön ide a documents szűrés
+
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
@@ -73,58 +164,228 @@ import axios from 'axios'
 const route = useRoute()
 const router = useRouter()
 
+const goToBoard = (id) => {
+  if (route.params.id !== String(id)) {
+    router.push(`/boards/${id}`)
+  }
+}
+
 // 📚 Állapotok
 const board = ref({})
 const notes = ref([])
 const children = ref([])
-const selectedNote = ref(null)
-const selectedBoard = ref(null)
 
 // 🎨 Színek + ikonok
 const availableIcons = [
-  "📄", "📝", "📦", "📁", "⚙️", "✅", "🧠", "🚀", "🎯",
-  "🗃️", "🗂️", "🗄️", "💡", "✏️", "🖋️", "📒", "🧾", "📌", "📅",
-  "📈", "⏳", "🔁", "🕒", "☑️", "🔒", "📥", "📤", "🎨", "🌈", "🧱", "🧩", "🔧", "🧰", "🖥️"
+  '📄',
+  '📝',
+  '📦',
+  '📁',
+  '⚙️',
+  '✅',
+  '🧠',
+  '🚀',
+  '🎯',
+  '🗃️',
+  '🗂️',
+  '🗄️',
+  '💡',
+  '✏️',
+  '🖋️',
+  '📒',
+  '🧾',
+  '📌',
+  '📅',
+  '📈',
+  '⏳',
+  '🔁',
+  '🕒',
+  '☑️',
+  '🔒',
+  '📥',
+  '📤',
+  '🎨',
+  '🌈',
+  '🧱',
+  '🧩',
+  '🔧',
+  '🧰',
+  '🖥️',
 ]
 
 // 📌 Snap to grid
 const gridSize = 20
 const snapToGrid = (value) => Math.round(value / gridSize) * gridSize
 
+const toggleNoteSelection = (note, event) => {
+  if (event.shiftKey) {
+    const exists = selectedNotes.value.some((n) => n.id === note.id)
+    if (exists) {
+      selectedNotes.value = selectedNotes.value.filter((n) => n.id !== note.id)
+    } else {
+      selectedNotes.value.push(note)
+    }
+    selectedBoards.value = [] // jegyzet kiválasztáskor töröljük a boardokat
+  } else {
+    selectedNotes.value = [note]
+    selectedBoards.value = []
+  }
+}
+
+const toggleBoardSelection = (board, event) => {
+  if (!board || typeof board !== 'object') return
+
+  if (event?.shiftKey) {
+    const exists = selectedBoards.value.some((b) => b.id === board.id)
+    if (exists) {
+      selectedBoards.value = selectedBoards.value.filter((b) => b.id !== board.id)
+    } else {
+      selectedBoards.value.push(board)
+    }
+    // Shift esetén nem törlünk jegyzeteket
+  } else {
+    selectedBoards.value = [board]
+    selectedNotes.value = [] // csak normál kattintás esetén töröljük a jegyzeteket
+  }
+}
+
+
+const startEditTitle = (child) => {
+  children.value.forEach((b) => (b.editing = false))
+  child.editing = true
+  nextTick(() => {
+    const el = titleInputs[child.id]
+    if (el) {
+      el.focus()
+      el.select() // 🔥 ez jelöli ki a teljes szöveget
+    }
+  })
+}
+
+const saveBoardTitle = async (child) => {
+  child.editing = false
+  await axios.patch(`http://127.0.0.1:8000/api/boards/${child.id}/`, {
+    title: child.title,
+  })
+}
+
+const cancelEditTitle = (child) => {
+  child.editing = false
+  // opcionálisan visszaállíthatod az eredeti címet is, ha elmented előtte
+}
+
 // 📍 Emoji menü jobb klikkre
 const emojiMenu = ref({
   visible: false,
   x: 0,
   y: 0,
-  board: null
+  board: null,
 })
 onMounted(async () => {
-  const boardId = route.params.id
-  const boardRes = await axios.get(`http://127.0.0.1:8000/api/boards/${boardId}/`)
-  board.value = boardRes.data
+  await fetchBoardWithAncestors(route.params.id)
 
   const notesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
   notes.value = notesRes.data
-    .filter(n => n.board === board.value.id)
-    .map(n => ({ ...n, editing: false }))
+    .filter((n) => n.board === board.value.id)
+    .map((n) => ({ ...n, editing: false }))
 
   const boardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
-  children.value = boardsRes.data.filter(b => b.parent === board.value.id)
+  children.value = boardsRes.data.filter((b) => b.parent === board.value.id)
 
   window.addEventListener('keydown', handleKeyDown)
+  console.log('Notes:', notes.value)
+  console.log('Children:', children.value)
 })
+
+onMounted(async () => {
+  console.log('children:', children.value)
+  await fetchBoardWithAncestors(route.params.id)
+  window.addEventListener('keydown', handleKeyDown)
+  window.addEventListener('click', handleGlobalClick)
+})
+
+const boardAncestors = ref([])
+
+const fetchBoardWithAncestors = async (id) => {
+  boardAncestors.value = []
+  let currentId = id
+
+  while (currentId) {
+    const res = await axios.get(`http://127.0.0.1:8000/api/boards/${currentId}/`)
+    const data = res.data
+    boardAncestors.value.unshift(data)
+    currentId = data.parent
+  }
+
+  // Az aktuális board az utolsó a sorban
+  board.value = boardAncestors.value.at(-1)
+
+  // 👇 Duplikált vég-elem kiszűrése (ha a board szülője is ő maga)
+  const lastTwo = boardAncestors.value.slice(-2)
+  if (lastTwo.length === 2 && lastTwo[0].id === lastTwo[1].id) {
+    boardAncestors.value.pop()
+  }
+
+  // Jegyzetek & gyermek boardok betöltése
+  const notesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
+  notes.value = notesRes.data
+    .filter((n) => n.board === board.value.id)
+    .map((n) => ({ ...n, editing: false }))
+
+  const boardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
+  children.value = boardsRes.data.filter((b) => b.parent === board.value.id)
+
+  const allNotesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
+  allNotes.value = allNotesRes.data.map((n) => ({ ...n, editing: false }))
+
+  const allBoardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
+  allBoards.value = allBoardsRes.data
+
+  // Az aktuális board tartalma
+  notes.value = allNotes.value.filter((n) => n.board == board.value.id)
+
+  children.value = allBoards.value
+    .filter((b) => b.parent == board.value.id && b.id !== board.value.id)
+    .map((b) => ({ ...b, editing: false }))
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', handleGlobalClick)
+})
+
+const handleGlobalClick = (e) => {
+  const isInsideNoteOrBoard = e.target.closest('.sticky-note') || e.target.closest('.board-wrapper')
+  const isInsideToolbar = e.target.closest('.toolbar')
+
+  if (!isInsideNoteOrBoard && !isInsideToolbar) {
+    selectedNotes.value = []
+    selectedBoards.value = []
+  }
+}
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeyDown)
 })
 
 const handleKeyDown = async (e) => {
-  if (e.key === 'Delete' && selectedNote.value) {
-    const confirmDelete = confirm('Biztosan törlöd a kijelölt jegyzetet?')
-    if (!confirmDelete) return
-    await axios.delete(`http://127.0.0.1:8000/api/notes/${selectedNote.value.id}/`)
-    notes.value = notes.value.filter(n => n.id !== selectedNote.value.id)
-    selectedNote.value = null
+  if (e.key === 'Delete') {
+    if (selectedNotes.value.length) {
+      const confirmDelete = confirm(`Biztosan törlöd a ${selectedNotes.value.length} jegyzetet?`)
+      if (!confirmDelete) return
+      for (const note of selectedNotes.value) {
+        await axios.delete(`http://127.0.0.1:8000/api/notes/${note.id}/`)
+      }
+      notes.value = notes.value.filter((n) => !selectedNotes.value.includes(n))
+      selectedNotes.value = []
+    } else if (selectedBoards.value.length) {
+      const confirmDelete = confirm(`Biztosan törlöd a ${selectedBoards.value.length} boardot?`)
+      if (!confirmDelete) return
+      for (const board of selectedBoards.value) {
+        await axios.delete(`http://127.0.0.1:8000/api/boards/${board.id}/`)
+      }
+      children.value = children.value.filter((b) => !selectedBoards.value.includes(b))
+      selectedBoards.value = []
+    }
   }
 }
 
@@ -135,9 +396,9 @@ const createNote = async () => {
     position_x: snapToGrid(100),
     position_y: snapToGrid(100),
     background_color: '#fff8b3',
-    text_color: '#000',
+    text_color: '#000000',
     width: 160,
-    height: 100
+    height: 100,
   })
   notes.value.push({ ...res.data, editing: true })
 }
@@ -147,9 +408,9 @@ const createBoard = async () => {
     title: 'Új board',
     parent: board.value.id || null,
     user: board.value.user,
-    emoji: "📁",
+    emoji: '📁',
     position_x: snapToGrid(200),
-    position_y: snapToGrid(150)
+    position_y: snapToGrid(150),
   })
   children.value.push(res.data)
 }
@@ -158,7 +419,7 @@ const createDocument = async () => {
   await axios.post('http://127.0.0.1:8000/api/documents/', {
     board: board.value.id,
     title: 'Új dokumentum',
-    content: ''
+    content: '',
   })
   alert('📄 Új dokumentum létrehozva!')
 }
@@ -166,28 +427,28 @@ const createDocument = async () => {
 const updateNoteStyle = async (note) => {
   await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
     background_color: note.background_color,
-    text_color: note.text_color
+    text_color: note.text_color,
   })
 }
 
 const updateBoardIcon = async (boardObj, icon) => {
   boardObj.emoji = icon
   await axios.patch(`http://127.0.0.1:8000/api/boards/${boardObj.id}/`, {
-    emoji: icon
+    emoji: icon,
   })
 }
 // 🎯 Jegyzet mozgatás (egérrel)
 const draggedNote = ref(null)
 const offset = { x: 0, y: 0 }
 
-const onNoteDragStart = (note) => {
-  draggedNote.value = note
-}
-
 const startDrag = (note, e) => {
   draggedNote.value = note
+
+  // offset kiszámítása
   offset.x = e.clientX - note.position_x
   offset.y = e.clientY - note.position_y
+
+  // események figyelése
   window.addEventListener('mousemove', onDrag)
   window.addEventListener('mouseup', stopDrag)
 }
@@ -202,7 +463,7 @@ const stopDrag = async () => {
   if (!draggedNote.value) return
   await axios.patch(`http://127.0.0.1:8000/api/notes/${draggedNote.value.id}/`, {
     position_x: draggedNote.value.position_x,
-    position_y: draggedNote.value.position_y
+    position_y: draggedNote.value.position_y,
   })
   draggedNote.value = null
   window.removeEventListener('mousemove', onDrag)
@@ -231,7 +492,7 @@ const stopBoardDrag = async () => {
   if (!draggedBoard) return
   await axios.patch(`http://127.0.0.1:8000/api/boards/${draggedBoard.id}/`, {
     position_x: draggedBoard.position_x,
-    position_y: draggedBoard.position_y
+    position_y: draggedBoard.position_y,
   })
   draggedBoard = null
   window.removeEventListener('mousemove', onBoardDrag)
@@ -241,9 +502,9 @@ const stopBoardDrag = async () => {
 const handleNoteDropOnBoard = async (e, targetBoard) => {
   if (!draggedNote.value || !targetBoard) return
   await axios.patch(`http://127.0.0.1:8000/api/notes/${draggedNote.value.id}/`, {
-    board: targetBoard.id
+    board: targetBoard.id,
   })
-  notes.value = notes.value.filter(n => n.id !== draggedNote.value.id)
+  notes.value = notes.value.filter((n) => n.id !== draggedNote.value.id)
   draggedNote.value = null
 }
 
@@ -251,7 +512,7 @@ const handleNoteDropOnBoard = async (e, targetBoard) => {
 const finishEdit = async (note) => {
   note.editing = false
   await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
-    content: note.content
+    content: note.content,
   })
 }
 
@@ -272,32 +533,12 @@ const startResize = (note, e) => {
     window.removeEventListener('mouseup', onMouseUp)
     await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
       width: note.width,
-      height: note.height
+      height: note.height,
     })
   }
 
   window.addEventListener('mousemove', onMouseMove)
   window.addEventListener('mouseup', onMouseUp)
-}
-
-// 🎯 Emoji panel jobb klikkre
-const openEmojiMenu = (e, boardObj) => {
-  emojiMenu.value = {
-    visible: true,
-    x: e.clientX,
-    y: e.clientY,
-    board: boardObj
-  }
-}
-
-const selectBoardIcon = async (icon) => {
-  const boardToUpdate = emojiMenu.value.board
-  if (!boardToUpdate) return
-  boardToUpdate.emoji = icon
-  await axios.patch(`http://127.0.0.1:8000/api/boards/${boardToUpdate.id}/`, {
-    emoji: icon
-  })
-  emojiMenu.value.visible = false
 }
 
 // ⌨️ Bezárás ESC-re
@@ -310,51 +551,88 @@ window.addEventListener('keydown', (e) => {
 const openSettings = () => {
   alert('⚙️ Beállítások még nincsenek – de dolgozhatunk rajta 😄')
 }
+import { watch } from 'vue'
+
+watch(
+  () => route.params.id,
+  async (newId) => {
+    await fetchBoardWithAncestors(newId)
+    selectedNotes.value = []
+    selectedBoards.value = []
+  },
+)
 </script>
 
+<style scoped>
+.icon-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  padding: 6px;
+  overflow-y: auto;
 
+  border-top: 1px solid #ccc;
+}
+.icon-picker::-webkit-scrollbar {
+  width: 6px;
+}
+.icon-picker::-webkit-scrollbar-thumb {
+  background-color: #bbb;
+  border-radius: 3px;
+}
+.emoji-option {
+  font-size: 22px;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  transition: background 0.2s;
+}
 
- <style scoped> 
+.emoji-option.selected {
+  background-color: #ccc;
+  box-shadow: inset 0 0 2px #888;
+}
 .sticky-note {
-     position: absolute;
-     min-width: 100px;
-     min-height: 80px;
-     padding: 8px;
-     border-radius: 6px;
-     box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.15);
-     cursor: grab;
-     user-select: none;
-     overflow: hidden;
-     border: 1px solid transparent;
+  position: absolute;
+  min-width: 100px;
+  min-height: 80px;
+  padding: 8px;
+  border-radius: 6px;
+  box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.15);
+  cursor: grab;
+  user-select: none;
+  overflow: hidden;
+  border: 1px solid transparent;
 }
- .resizer {
-     position: absolute;
-     width: 16px;
-     height: 16px;
-     right: 2px;
-     bottom: 2px;
-     background: transparent;
-     border-right: 2px solid rgba(0, 0, 0, 0.3);
-     border-bottom: 2px solid rgba(0, 0, 0, 0.3);
-     box-sizing: border-box;
-     cursor: nwse-resize;
-     pointer-events: auto;
+.resizer {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  right: 2px;
+  bottom: 2px;
+  background: transparent;
+  border-right: 2px solid rgba(0, 0, 0, 0.3);
+  border-bottom: 2px solid rgba(0, 0, 0, 0.3);
+  box-sizing: border-box;
+  cursor: nwse-resize;
+  pointer-events: auto;
 }
- .topbar {
-     position: fixed;
-     top: 0;
-     left: 0;
-     right: 0;
-     height: 40px;
-     background: #fdfdfd;
-     border-bottom: 1px solid #ccc;
-     padding: 0 16px;
-     display: flex;
-     align-items: center;
-     justify-content: space-between;
-     font-weight: bold;
-     font-size: 15px;
-     z-index: 1000;
+.topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: #fdfdfd;
+  border-bottom: 1px solid #ccc;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: bold;
+  font-size: 15px;
+  z-index: 1000;
 }
 .emoji-panel {
   position: fixed;
@@ -365,7 +643,7 @@ const openSettings = () => {
   border-radius: 10px;
   padding: 12px 16px;
   width: 180px;
-  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
   z-index: 1000;
   display: flex;
   flex-direction: column;
@@ -391,9 +669,21 @@ const openSettings = () => {
   box-shadow: inset 0 0 0 2px #666;
 }
 
- .topbar-left {
-     color: #333;
+.topbar-left {
+  color: #333;
 }
+.board-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #666;
+  text-align: center;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: wrap;
+  user-select: none;
+}
+
 .note-editor {
   width: 100%;
   height: 100%;
@@ -406,97 +696,175 @@ const openSettings = () => {
   box-sizing: border-box;
 }
 
- .topbar-right {
-     display: flex;
-     align-items: center;
+.topbar-right {
+  display: flex;
+  align-items: center;
 }
- .settings-btn {
-     background: none;
-     border: none;
-     font-size: 20px;
-     cursor: pointer;
-     padding: 4px;
-     transition: transform 0.2s;
+.settings-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px;
+  transition: transform 0.2s;
 }
- .settings-btn:hover {
-     transform: rotate(20deg);
+.settings-btn:hover {
+  transform: rotate(20deg);
 }
- .board-area {
-     flex: 1;
-     position: relative;
-     height: calc(100vh - 40px);
-     margin-top: 40px;
-    /* Ezzel elkerülöd az átfedést */
-     overflow: hidden;
-     margin-left: 48px;
+.board-area {
+  flex: 1;
+  position: relative;
+  height: calc(100vh - 40px);
+  margin-top: 40px;
+  /* Ezzel elkerülöd az átfedést */
+  overflow: hidden;
+  margin-left: 48px;
 }
- .toolbar {
-     position: fixed;
-     top: 40px;
-     left: 0;
-     width: 48px;
-     height: calc(100vh - 40px);
-     background: #f8f8f8;
-     padding: 8px 4px;
-     border-right: 1px solid #ccc;
-     display: flex;
-     flex-direction: column;
-     align-items: center;
-     gap: 12px;
-     z-index: 999;
+.toolbar {
+  position: fixed;
+  top: 40px;
+  left: 0;
+  width: 48px;
+  height: calc(100vh - 40px);
+  background: #f8f8f8;
+  padding: 0px 4px;
+  border-right: 1px solid #ccc;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  z-index: 999;
 }
- .toolbar button {
-     background: none;
-     border: none;
-     font-size: 20px;
-     cursor: pointer;
-     transition: transform 0.2s;
+.toolbar button {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  transition: transform 0.2s;
 }
- .toolbar button:hover {
-     transform: scale(1.2);
+.toolbar button:hover {
+  transform: scale(1.2);
 }
- .color-tools {
-     display: flex;
-     flex-direction: column;
-     gap: 6px;
-     margin-top: 8px;
+.color-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
 }
- .color-tools input[type="color"] {
-     width: 28px;
-     height: 28px;
-     border: none;
-     border-radius: 4px;
-     padding: 0;
-     cursor: pointer;
-     box-shadow: 0 0 3px rgba(0, 0, 0, 0.2);
+.color-tools input[type='color'] {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.2);
 }
- .board-card {
-     position: absolute;
-     border-radius: 8px;
-     background: #f8f8f8;
-     border: 1px solid #ccc;
-     box-shadow: 1px 1px 5px rgba(0, 0, 0, 0.1);
-     text-align: center;
-     display: flex;
-     align-items: center;
-     justify-content: center;
-     font-size: 36px;
-     cursor: grab;
-     user-select: none;
-     display: flex;
-    flex-direction: column;
+.board-card {
+  border-radius: 8px;
+  background: #f8f8f8;
+  border: 1px solid #ccc;
+  box-shadow: 1px 1px 5px rgba(0, 0, 0, 0.1);
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 36px;
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
 }
- .emoji {
-     font-size: 36px;
-     text-align: center;
+.board-title-input {
+  font-size: 11px;
+  text-align: center;
+  color: #444;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  width: 100%;
+  padding: 4px 2px;
+  box-sizing: border-box;
 }
- .template-icon {
-     font-size: 28px;
-     cursor: grab;
-     margin: 10px 0;
-     transition: transform 0.2s;
+
+.emoji {
+  font-size: 36px;
+  text-align: center;
 }
- .template-icon:hover {
-     transform: scale(1.2);
+.template-icon {
+  font-size: 28px;
+  cursor: grab;
+  margin: 10px 0;
+  transition: transform 0.2s;
 }
- </style> 
+.template-icon:hover {
+  transform: scale(1.2);
+}
+.board-title-small {
+  font-size: 11px;
+  text-align: center;
+  color: #444;
+  padding-top: 2px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  user-select: none;
+}
+.board-wrapper {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 80px;
+  pointer-events: auto;
+  min-height: 100px; /* vagy nagyobb, ha kell */
+  z-index: 1;
+  min-height: 120px;
+}
+.board-wrapper.selected .board-card {
+  border-color: #00000067;
+  box-shadow: 0 0 4px 2px rgb(255, 255, 255);
+}
+
+.board-card {
+  width: 65px;
+  height: 65px;
+  background: #fff;
+  border: 2px solid #ccc;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.board-label {
+  margin-top: 4px;
+  font-size: 11px;
+  text-align: center;
+  color: #444;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  user-select: none;
+}
+.breadcrumb-link {
+  font-weight: 500;
+  font-size: 16px;
+  color: #333;
+  transition: color 0.2s;
+}
+.breadcrumb-link:hover {
+  color: #007bff;
+}
+.sticky-note.selected {
+  outline: 2px solid #00000067;
+  outline-offset: -1px;
+  box-shadow: 0 0 4px 2px rgb(255, 255, 255);
+}
+.sticky-note.selected {
+  outline: 2px solid #007bff;
+}
+.board-wrapper.selected .board-card {
+  border-color: #007bff;
+  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.3);
+}
+</style>
