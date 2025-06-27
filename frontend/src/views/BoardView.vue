@@ -31,6 +31,7 @@
         <input
           type="color"
           :value="selectedNotes[0].background_color"
+          :class="{ mixed: hasMixedColors }"
           @input="
             (e) => {
               selectedNotes.forEach((note) => (note.background_color = e.target.value))
@@ -148,6 +149,8 @@
 </template>
 
 <script setup>
+const draggedBoards = ref([])
+const boardOffsetMap = new Map()
 const titleInputs = {}
 const selectedNotes = ref([])
 const selectedBoards = ref([])
@@ -156,8 +159,10 @@ const allBoards = ref([])
 const getNoteCount = (id) => allNotes.value.filter((n) => n.board == id).length
 const getChildBoardCount = (id) => allBoards.value.filter((b) => b.parent == id).length
 const getFileCount = (id) => 0 // majd jön ide a documents szűrés
+const draggedNotes = ref([])
+const dragOffsetMap = new Map()
 
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 
@@ -218,14 +223,16 @@ const gridSize = 20
 const snapToGrid = (value) => Math.round(value / gridSize) * gridSize
 
 const toggleNoteSelection = (note, event) => {
-  if (event.shiftKey) {
+  const isMulti = event.ctrlKey || event.metaKey // 💡 Windows: Ctrl, Mac: Cmd
+
+  if (isMulti) {
     const exists = selectedNotes.value.some((n) => n.id === note.id)
     if (exists) {
       selectedNotes.value = selectedNotes.value.filter((n) => n.id !== note.id)
     } else {
       selectedNotes.value.push(note)
     }
-    selectedBoards.value = [] // jegyzet kiválasztáskor töröljük a boardokat
+    selectedBoards.value = []
   } else {
     selectedNotes.value = [note]
     selectedBoards.value = []
@@ -235,17 +242,19 @@ const toggleNoteSelection = (note, event) => {
 const toggleBoardSelection = (board, event) => {
   if (!board || typeof board !== 'object') return
 
-  if (event?.shiftKey) {
+  const isMulti = event.ctrlKey || event.metaKey
+
+  if (isMulti) {
     const exists = selectedBoards.value.some((b) => b.id === board.id)
     if (exists) {
       selectedBoards.value = selectedBoards.value.filter((b) => b.id !== board.id)
     } else {
       selectedBoards.value.push(board)
     }
-    // Shift esetén nem törlünk jegyzeteket
+    // Jegyzeteket nem törlünk
   } else {
     selectedBoards.value = [board]
-    selectedNotes.value = [] // csak normál kattintás esetén töröljük a jegyzeteket
+    selectedNotes.value = []
   }
 }
 
@@ -354,7 +363,11 @@ onBeforeUnmount(() => {
 })
 
 const handleGlobalClick = (e) => {
-  const isInsideNoteOrBoard = e.target.closest('.sticky-note') || e.target.closest('.board-wrapper')
+  const isInsideNoteOrBoard =
+    e.target.closest('.sticky-note') ||
+    e.target.closest('.sticky-note *') ||
+    e.target.closest('.board-wrapper') ||
+    e.target.closest('.board-wrapper *')
   const isInsideToolbar = e.target.closest('.toolbar')
 
   if (!isInsideNoteOrBoard && !isInsideToolbar) {
@@ -402,6 +415,11 @@ const createNote = async () => {
   })
   notes.value.push({ ...res.data, editing: true })
 }
+const hasMixedColors = computed(() => {
+  if (selectedNotes.value.length <= 1) return false
+  const base = selectedNotes.value[0].background_color
+  return selectedNotes.value.some((n) => n.background_color !== base)
+})
 
 const createBoard = async () => {
   const res = await axios.post('http://127.0.0.1:8000/api/boards/', {
@@ -442,30 +460,38 @@ const draggedNote = ref(null)
 const offset = { x: 0, y: 0 }
 
 const startDrag = (note, e) => {
-  draggedNote.value = note
+  draggedNotes.value = selectedNotes.value.length > 0 ? [...selectedNotes.value] : [note]
 
-  // offset kiszámítása
-  offset.x = e.clientX - note.position_x
-  offset.y = e.clientY - note.position_y
+  dragOffsetMap.clear()
+  for (const n of draggedNotes.value) {
+    dragOffsetMap.set(n.id, {
+      x: e.clientX - n.position_x,
+      y: e.clientY - n.position_y,
+    })
+  }
 
-  // események figyelése
   window.addEventListener('mousemove', onDrag)
   window.addEventListener('mouseup', stopDrag)
 }
 
 const onDrag = (e) => {
-  if (!draggedNote.value) return
-  draggedNote.value.position_x = snapToGrid(e.clientX - offset.x)
-  draggedNote.value.position_y = snapToGrid(e.clientY - offset.y)
+  for (const note of draggedNotes.value) {
+    const offset = dragOffsetMap.get(note.id)
+    if (!offset) continue
+    note.position_x = snapToGrid(e.clientX - offset.x)
+    note.position_y = snapToGrid(e.clientY - offset.y)
+  }
 }
 
 const stopDrag = async () => {
-  if (!draggedNote.value) return
-  await axios.patch(`http://127.0.0.1:8000/api/notes/${draggedNote.value.id}/`, {
-    position_x: draggedNote.value.position_x,
-    position_y: draggedNote.value.position_y,
-  })
-  draggedNote.value = null
+  for (const note of draggedNotes.value) {
+    await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
+      position_x: note.position_x,
+      position_y: note.position_y,
+    })
+  }
+  draggedNotes.value = []
+  dragOffsetMap.clear()
   window.removeEventListener('mousemove', onDrag)
   window.removeEventListener('mouseup', stopDrag)
 }
@@ -474,30 +500,46 @@ const stopDrag = async () => {
 let draggedBoard = null
 let boardOffset = { x: 0, y: 0 }
 
-const startBoardDrag = (child, e) => {
-  draggedBoard = child
-  boardOffset.x = e.clientX - child.position_x
-  boardOffset.y = e.clientY - child.position_y
+const startBoardDrag = (board, e) => {
+  draggedBoards.value =
+    selectedBoards.value.length > 0 ? [...selectedBoards.value] : [board]
+
+  boardOffsetMap.clear()
+  for (const b of draggedBoards.value) {
+    boardOffsetMap.set(b.id, {
+      x: e.clientX - b.position_x,
+      y: e.clientY - b.position_y,
+    })
+  }
+
   window.addEventListener('mousemove', onBoardDrag)
   window.addEventListener('mouseup', stopBoardDrag)
 }
 
 const onBoardDrag = (e) => {
-  if (!draggedBoard) return
-  draggedBoard.position_x = snapToGrid(e.clientX - boardOffset.x)
-  draggedBoard.position_y = snapToGrid(e.clientY - boardOffset.y)
+  for (const board of draggedBoards.value) {
+    const offset = boardOffsetMap.get(board.id)
+    if (!offset) continue
+    board.position_x = snapToGrid(e.clientX - offset.x)
+    board.position_y = snapToGrid(e.clientY - offset.y)
+  }
 }
 
+
 const stopBoardDrag = async () => {
-  if (!draggedBoard) return
-  await axios.patch(`http://127.0.0.1:8000/api/boards/${draggedBoard.id}/`, {
-    position_x: draggedBoard.position_x,
-    position_y: draggedBoard.position_y,
-  })
-  draggedBoard = null
+  for (const board of draggedBoards.value) {
+    await axios.patch(`http://127.0.0.1:8000/api/boards/${board.id}/`, {
+      position_x: board.position_x,
+      position_y: board.position_y,
+    })
+  }
+
+  draggedBoards.value = []
+  boardOffsetMap.clear()
   window.removeEventListener('mousemove', onBoardDrag)
   window.removeEventListener('mouseup', stopBoardDrag)
 }
+
 // 🧲 Jegyzet áthelyezése másik board-ra
 const handleNoteDropOnBoard = async (e, targetBoard) => {
   if (!draggedNote.value || !targetBoard) return
@@ -551,7 +593,6 @@ window.addEventListener('keydown', (e) => {
 const openSettings = () => {
   alert('⚙️ Beállítások még nincsenek – de dolgozhatunk rajta 😄')
 }
-import { watch } from 'vue'
 
 watch(
   () => route.params.id,
@@ -824,6 +865,10 @@ watch(
   border-color: #00000067;
   box-shadow: 0 0 4px 2px rgb(255, 255, 255);
 }
+input.mixed {
+  outline: 2px dashed orange;
+  opacity: 0.7;
+}
 
 .board-card {
   width: 65px;
@@ -866,5 +911,9 @@ watch(
 .board-wrapper.selected .board-card {
   border-color: #007bff;
   box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.3);
+}
+.sticky-note.dragging {
+  opacity: 0.7;
+  cursor: grabbing;
 }
 </style>
