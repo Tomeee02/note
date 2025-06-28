@@ -83,7 +83,10 @@
           v-for="note in notes"
           :key="note.id"
           class="sticky-note"
-          :class="{ selected: selectedNotes.some((n) => n.id === note.id) }"
+          :class="{
+            selected: selectedNotes.some((n) => n.id === note.id),
+            dragging: draggedNotes.some((n) => n.id === note.id),
+          }"
           :style="{
             left: note.position_x + 'px',
             top: note.position_y + 'px',
@@ -93,7 +96,7 @@
             height: note.height + 'px',
             borderColor: note.background_color,
           }"
-          @mousedown.stop="startDrag(note, $event)"
+          @mousedown.stop="startUnifiedDrag(note, $event)"
           @click.stop="(e) => toggleNoteSelection(note, e)"
         >
           <div v-if="!note.editing" @dblclick="note.editing = true">
@@ -113,11 +116,16 @@
         <div
           v-for="child in children"
           :key="child.id"
-          class="board-wrapper"
+          :class="[
+            'board-wrapper',
+            {
+              selected: selectedBoards.some((b) => b.id === child.id),
+              dragging: draggedBoards.some((b) => b.id === child.id),
+            },
+          ]"
           @click.stop="(e) => toggleBoardSelection(child, e)"
-          :class="['board-wrapper', { selected: selectedBoards.some((b) => b.id === child.id) }]"
           :style="{ left: child.position_x + 'px', top: child.position_y + 'px' }"
-          @mousedown.stop="startBoardDrag(child, $event)"
+          @mousedown.stop="startUnifiedDrag(child, $event)"
           @contextmenu.prevent="openEmojiMenu($event, child)"
           @dblclick.stop="goToBoard(child.id)"
         >
@@ -147,40 +155,42 @@
     </div>
   </div>
 </template>
-
 <script setup>
-const draggedBoards = ref([])
-const boardOffsetMap = new Map()
-const titleInputs = {}
-const selectedNotes = ref([])
-const selectedBoards = ref([])
-const allNotes = ref([])
-const allBoards = ref([])
-const getNoteCount = (id) => allNotes.value.filter((n) => n.board == id).length
-const getChildBoardCount = (id) => allBoards.value.filter((b) => b.parent == id).length
-const getFileCount = (id) => 0 // majd jön ide a documents szűrés
-const draggedNotes = ref([])
-const dragOffsetMap = new Map()
-
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 
+// — ROUTER —
 const route = useRoute()
 const router = useRouter()
-
 const goToBoard = (id) => {
   if (route.params.id !== String(id)) {
     router.push(`/boards/${id}`)
   }
 }
 
-// 📚 Állapotok
+// — ÁLLAPOTOK & REFS —
+const boardAncestors = ref([])
 const board = ref({})
-const notes = ref([])
-const children = ref([])
+const allNotes = ref([])
+const allBoards = ref([])
 
-// 🎨 Színek + ikonok
+const notes = computed(() => allNotes.value.filter((n) => n.board === board.value.id))
+const children = computed(() =>
+  allBoards.value.filter((b) => b.parent === board.value.id && b.id !== board.value.id),
+)
+
+const selectedNotes = ref([])
+const selectedBoards = ref([])
+const draggedNotes = ref([])
+const draggedBoards = ref([])
+
+const dragOffsetMap = new Map()
+const boardOffsetMap = new Map()
+const titleInputs = {} // ref-ek a board-cím inputokhoz
+const emojiMenu = ref({ visible: false, x: 0, y: 0, board: null })
+
+// — KONSTANSOK & HELPEREK —
 const availableIcons = [
   '📄',
   '📝',
@@ -217,192 +227,53 @@ const availableIcons = [
   '🧰',
   '🖥️',
 ]
-
-// 📌 Snap to grid
 const gridSize = 20
-const snapToGrid = (value) => Math.round(value / gridSize) * gridSize
+const snapToGrid = (v) => Math.round(v / gridSize) * gridSize
 
-const toggleNoteSelection = (note, event) => {
-  const isMulti = event.ctrlKey || event.metaKey // 💡 Windows: Ctrl, Mac: Cmd
+const hasMixedColors = computed(() => {
+  if (selectedNotes.value.length < 2) return false
+  const base = selectedNotes.value[0].background_color
+  return selectedNotes.value.some((n) => n.background_color !== base)
+})
+
+// — TEMPLATE‐HELPEREK —
+const getNoteCount = (id) => allNotes.value.filter((n) => n.board === id).length
+
+const getChildBoardCount = (id) => allBoards.value.filter((b) => b.parent === id).length
+
+const getFileCount = () => 0 // majd docs‐számítás
+
+// — KIJELÖLÉS —
+function toggleNoteSelection(note, e) {
+  const isMulti = e.ctrlKey || e.metaKey
+  const exists = selectedNotes.value.some((n) => n.id === note.id)
 
   if (isMulti) {
-    const exists = selectedNotes.value.some((n) => n.id === note.id)
-    if (exists) {
-      selectedNotes.value = selectedNotes.value.filter((n) => n.id !== note.id)
-    } else {
-      selectedNotes.value.push(note)
-    }
-    selectedBoards.value = []
+    selectedNotes.value = exists
+      ? selectedNotes.value.filter((n) => n.id !== note.id)
+      : [...selectedNotes.value, note]
   } else {
     selectedNotes.value = [note]
     selectedBoards.value = []
   }
 }
 
-const toggleBoardSelection = (board, event) => {
-  if (!board || typeof board !== 'object') return
-
-  const isMulti = event.ctrlKey || event.metaKey
+function toggleBoardSelection(brd, e) {
+  const isMulti = e.ctrlKey || e.metaKey
+  const exists = selectedBoards.value.some((b) => b.id === brd.id)
 
   if (isMulti) {
-    const exists = selectedBoards.value.some((b) => b.id === board.id)
-    if (exists) {
-      selectedBoards.value = selectedBoards.value.filter((b) => b.id !== board.id)
-    } else {
-      selectedBoards.value.push(board)
-    }
-    // Jegyzeteket nem törlünk
+    selectedBoards.value = exists
+      ? selectedBoards.value.filter((b) => b.id !== brd.id)
+      : [...selectedBoards.value, brd]
   } else {
-    selectedBoards.value = [board]
+    selectedBoards.value = [brd]
     selectedNotes.value = []
   }
 }
 
-
-const startEditTitle = (child) => {
-  children.value.forEach((b) => (b.editing = false))
-  child.editing = true
-  nextTick(() => {
-    const el = titleInputs[child.id]
-    if (el) {
-      el.focus()
-      el.select() // 🔥 ez jelöli ki a teljes szöveget
-    }
-  })
-}
-
-const saveBoardTitle = async (child) => {
-  child.editing = false
-  await axios.patch(`http://127.0.0.1:8000/api/boards/${child.id}/`, {
-    title: child.title,
-  })
-}
-
-const cancelEditTitle = (child) => {
-  child.editing = false
-  // opcionálisan visszaállíthatod az eredeti címet is, ha elmented előtte
-}
-
-// 📍 Emoji menü jobb klikkre
-const emojiMenu = ref({
-  visible: false,
-  x: 0,
-  y: 0,
-  board: null,
-})
-onMounted(async () => {
-  await fetchBoardWithAncestors(route.params.id)
-
-  const notesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
-  notes.value = notesRes.data
-    .filter((n) => n.board === board.value.id)
-    .map((n) => ({ ...n, editing: false }))
-
-  const boardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
-  children.value = boardsRes.data.filter((b) => b.parent === board.value.id)
-
-  window.addEventListener('keydown', handleKeyDown)
-  console.log('Notes:', notes.value)
-  console.log('Children:', children.value)
-})
-
-onMounted(async () => {
-  console.log('children:', children.value)
-  await fetchBoardWithAncestors(route.params.id)
-  window.addEventListener('keydown', handleKeyDown)
-  window.addEventListener('click', handleGlobalClick)
-})
-
-const boardAncestors = ref([])
-
-const fetchBoardWithAncestors = async (id) => {
-  boardAncestors.value = []
-  let currentId = id
-
-  while (currentId) {
-    const res = await axios.get(`http://127.0.0.1:8000/api/boards/${currentId}/`)
-    const data = res.data
-    boardAncestors.value.unshift(data)
-    currentId = data.parent
-  }
-
-  // Az aktuális board az utolsó a sorban
-  board.value = boardAncestors.value.at(-1)
-
-  // 👇 Duplikált vég-elem kiszűrése (ha a board szülője is ő maga)
-  const lastTwo = boardAncestors.value.slice(-2)
-  if (lastTwo.length === 2 && lastTwo[0].id === lastTwo[1].id) {
-    boardAncestors.value.pop()
-  }
-
-  // Jegyzetek & gyermek boardok betöltése
-  const notesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
-  notes.value = notesRes.data
-    .filter((n) => n.board === board.value.id)
-    .map((n) => ({ ...n, editing: false }))
-
-  const boardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
-  children.value = boardsRes.data.filter((b) => b.parent === board.value.id)
-
-  const allNotesRes = await axios.get('http://127.0.0.1:8000/api/notes/')
-  allNotes.value = allNotesRes.data.map((n) => ({ ...n, editing: false }))
-
-  const allBoardsRes = await axios.get('http://127.0.0.1:8000/api/boards/')
-  allBoards.value = allBoardsRes.data
-
-  // Az aktuális board tartalma
-  notes.value = allNotes.value.filter((n) => n.board == board.value.id)
-
-  children.value = allBoards.value
-    .filter((b) => b.parent == board.value.id && b.id !== board.value.id)
-    .map((b) => ({ ...b, editing: false }))
-}
-
-onBeforeUnmount(() => {
-  window.removeEventListener('click', handleGlobalClick)
-})
-
-const handleGlobalClick = (e) => {
-  const isInsideNoteOrBoard =
-    e.target.closest('.sticky-note') ||
-    e.target.closest('.sticky-note *') ||
-    e.target.closest('.board-wrapper') ||
-    e.target.closest('.board-wrapper *')
-  const isInsideToolbar = e.target.closest('.toolbar')
-
-  if (!isInsideNoteOrBoard && !isInsideToolbar) {
-    selectedNotes.value = []
-    selectedBoards.value = []
-  }
-}
-
-onBeforeUnmount(() => {
-  window.removeEventListener('keydown', handleKeyDown)
-})
-
-const handleKeyDown = async (e) => {
-  if (e.key === 'Delete') {
-    if (selectedNotes.value.length) {
-      const confirmDelete = confirm(`Biztosan törlöd a ${selectedNotes.value.length} jegyzetet?`)
-      if (!confirmDelete) return
-      for (const note of selectedNotes.value) {
-        await axios.delete(`http://127.0.0.1:8000/api/notes/${note.id}/`)
-      }
-      notes.value = notes.value.filter((n) => !selectedNotes.value.includes(n))
-      selectedNotes.value = []
-    } else if (selectedBoards.value.length) {
-      const confirmDelete = confirm(`Biztosan törlöd a ${selectedBoards.value.length} boardot?`)
-      if (!confirmDelete) return
-      for (const board of selectedBoards.value) {
-        await axios.delete(`http://127.0.0.1:8000/api/boards/${board.id}/`)
-      }
-      children.value = children.value.filter((b) => !selectedBoards.value.includes(b))
-      selectedBoards.value = []
-    }
-  }
-}
-
-const createNote = async () => {
+// — CRUD: LÉTREHOZÁS —
+async function createNote() {
   const res = await axios.post('http://127.0.0.1:8000/api/notes/', {
     board: board.value.id,
     content: 'Új jegyzet',
@@ -413,15 +284,10 @@ const createNote = async () => {
     width: 160,
     height: 100,
   })
-  notes.value.push({ ...res.data, editing: true })
+  allNotes.value.push({ ...res.data, editing: true })
 }
-const hasMixedColors = computed(() => {
-  if (selectedNotes.value.length <= 1) return false
-  const base = selectedNotes.value[0].background_color
-  return selectedNotes.value.some((n) => n.background_color !== base)
-})
 
-const createBoard = async () => {
+async function createBoard() {
   const res = await axios.post('http://127.0.0.1:8000/api/boards/', {
     title: 'Új board',
     parent: board.value.id || null,
@@ -430,10 +296,16 @@ const createBoard = async () => {
     position_x: snapToGrid(200),
     position_y: snapToGrid(150),
   })
-  children.value.push(res.data)
+  allBoards.value.push({ ...res.data, editing: false })
 }
 
-const createDocument = async () => {
+async function finishEdit(note) {
+  note.editing = false
+  // közvetlenül axios.patch-et használunk:
+  await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, { content: note.content })
+}
+
+async function createDocument() {
   await axios.post('http://127.0.0.1:8000/api/documents/', {
     board: board.value.id,
     title: 'Új dokumentum',
@@ -442,166 +314,189 @@ const createDocument = async () => {
   alert('📄 Új dokumentum létrehozva!')
 }
 
-const updateNoteStyle = async (note) => {
+// — CRUD: FRISSÍTÉS —
+async function updateNoteStyle(note) {
   await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
     background_color: note.background_color,
     text_color: note.text_color,
   })
 }
 
-const updateBoardIcon = async (boardObj, icon) => {
-  boardObj.emoji = icon
-  await axios.patch(`http://127.0.0.1:8000/api/boards/${boardObj.id}/`, {
+async function updateBoardIcon(brd, icon) {
+  brd.emoji = icon
+  await axios.patch(`http://127.0.0.1:8000/api/boards/${brd.id}/`, {
     emoji: icon,
   })
 }
-// 🎯 Jegyzet mozgatás (egérrel)
-const draggedNote = ref(null)
-const offset = { x: 0, y: 0 }
 
-const startDrag = (note, e) => {
-  draggedNotes.value = selectedNotes.value.length > 0 ? [...selectedNotes.value] : [note]
+// — DRAG & DROP: JEGYZET & BOARD EGYBE —
+function startUnifiedDrag(item, e) {
+  const isNote = 'content' in item
+  const isBoard = 'emoji' in item
+
+  draggedNotes.value = selectedNotes.value.length ? [...selectedNotes.value] : isNote ? [item] : []
+
+  draggedBoards.value = selectedBoards.value.length
+    ? [...selectedBoards.value]
+    : isBoard
+      ? [item]
+      : []
 
   dragOffsetMap.clear()
-  for (const n of draggedNotes.value) {
-    dragOffsetMap.set(n.id, {
+  draggedNotes.value.forEach((n) => {
+    dragOffsetMap.set(`note-${n.id}`, {
       x: e.clientX - n.position_x,
       y: e.clientY - n.position_y,
     })
-  }
-
-  window.addEventListener('mousemove', onDrag)
-  window.addEventListener('mouseup', stopDrag)
-}
-
-const onDrag = (e) => {
-  for (const note of draggedNotes.value) {
-    const offset = dragOffsetMap.get(note.id)
-    if (!offset) continue
-    note.position_x = snapToGrid(e.clientX - offset.x)
-    note.position_y = snapToGrid(e.clientY - offset.y)
-  }
-}
-
-const stopDrag = async () => {
-  for (const note of draggedNotes.value) {
-    await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
-      position_x: note.position_x,
-      position_y: note.position_y,
-    })
-  }
-  draggedNotes.value = []
-  dragOffsetMap.clear()
-  window.removeEventListener('mousemove', onDrag)
-  window.removeEventListener('mouseup', stopDrag)
-}
-
-// 📁 Board mozgatás (ugyanez boardokra)
-let draggedBoard = null
-let boardOffset = { x: 0, y: 0 }
-
-const startBoardDrag = (board, e) => {
-  draggedBoards.value =
-    selectedBoards.value.length > 0 ? [...selectedBoards.value] : [board]
-
+  })
   boardOffsetMap.clear()
-  for (const b of draggedBoards.value) {
+  draggedBoards.value.forEach((b) => {
     boardOffsetMap.set(b.id, {
       x: e.clientX - b.position_x,
       y: e.clientY - b.position_y,
     })
-  }
+  })
 
-  window.addEventListener('mousemove', onBoardDrag)
-  window.addEventListener('mouseup', stopBoardDrag)
+  window.addEventListener('mousemove', onUnifiedDrag)
+  window.addEventListener('mouseup', stopUnifiedDrag)
+}
+const updateResource = async (endpoint, payload) => {
+  const res = await api.patch(endpoint, payload)
+  return res.data
 }
 
-const onBoardDrag = (e) => {
-  for (const board of draggedBoards.value) {
-    const offset = boardOffsetMap.get(board.id)
-    if (!offset) continue
-    board.position_x = snapToGrid(e.clientX - offset.x)
-    board.position_y = snapToGrid(e.clientY - offset.y)
-  }
+function onUnifiedDrag(e) {
+  draggedNotes.value.forEach((n) => {
+    const off = dragOffsetMap.get(`note-${n.id}`)
+    if (!off) return
+    n.position_x = snapToGrid(e.clientX - off.x)
+    n.position_y = snapToGrid(e.clientY - off.y)
+  })
+  draggedBoards.value.forEach((b) => {
+    const off = boardOffsetMap.get(b.id)
+    if (!off) return
+    b.position_x = snapToGrid(e.clientX - off.x)
+    b.position_y = snapToGrid(e.clientY - off.y)
+  })
 }
 
+async function stopUnifiedDrag() {
+  await Promise.all([
+    ...draggedNotes.value.map((n) =>
+      axios.patch(`http://127.0.0.1:8000/api/notes/${n.id}/`, {
+        position_x: n.position_x,
+        position_y: n.position_y,
+      }),
+    ),
+    ...draggedBoards.value.map((b) =>
+      axios.patch(`http://127.0.0.1:8000/api/boards/${b.id}/`, {
+        position_x: b.position_x,
+        position_y: b.position_y,
+      }),
+    ),
+  ])
 
-const stopBoardDrag = async () => {
-  for (const board of draggedBoards.value) {
-    await axios.patch(`http://127.0.0.1:8000/api/boards/${board.id}/`, {
-      position_x: board.position_x,
-      position_y: board.position_y,
-    })
-  }
-
-  draggedBoards.value = []
+  draggedNotes.value.length = 0
+  draggedBoards.value.length = 0
+  dragOffsetMap.clear()
   boardOffsetMap.clear()
-  window.removeEventListener('mousemove', onBoardDrag)
-  window.removeEventListener('mouseup', stopBoardDrag)
+
+  window.removeEventListener('mousemove', onUnifiedDrag)
+  window.removeEventListener('mouseup', stopUnifiedDrag)
 }
 
-// 🧲 Jegyzet áthelyezése másik board-ra
-const handleNoteDropOnBoard = async (e, targetBoard) => {
-  if (!draggedNote.value || !targetBoard) return
-  await axios.patch(`http://127.0.0.1:8000/api/notes/${draggedNote.value.id}/`, {
-    board: targetBoard.id,
-  })
-  notes.value = notes.value.filter((n) => n.id !== draggedNote.value.id)
-  draggedNote.value = null
+// — BILLENTYŰZET & GLOBÁLIS KLIKK —
+async function handleKeyDown(e) {
+  if (e.key !== 'Delete') return
+  const total = selectedNotes.value.length + selectedBoards.value.length
+  if (!total || !confirm(`Biztos törlöd a ${total} elemet?`)) return
+
+  await Promise.all([
+    ...selectedNotes.value.map((n) => axios.delete(`http://127.0.0.1:8000/api/notes/${n.id}/`)),
+    ...selectedBoards.value.map((b) => axios.delete(`http://127.0.0.1:8000/api/boards/${b.id}/`)),
+  ])
+
+  allNotes.value = allNotes.value.filter((n) => !selectedNotes.value.includes(n))
+  allBoards.value = allBoards.value.filter((b) => !selectedBoards.value.includes(b))
+  selectedNotes.value.length = 0
+  selectedBoards.value.length = 0
 }
 
-// 🖊️ Szerkesztés dupla kattintásra
-const finishEdit = async (note) => {
-  note.editing = false
-  await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
-    content: note.content,
-  })
-}
-
-// ↔️ Jegyzet méretezése
-const startResize = (note, e) => {
-  const startX = e.clientX
-  const startY = e.clientY
-  const startWidth = note.width || 160
-  const startHeight = note.height || 100
-
-  const onMouseMove = (ev) => {
-    note.width = Math.max(100, startWidth + (ev.clientX - startX))
-    note.height = Math.max(80, startHeight + (ev.clientY - startY))
+function handleGlobalClick(e) {
+  const inside = e.target.closest(
+    '.sticky-note, .sticky-note *, .board-wrapper, .board-wrapper *, .toolbar',
+  )
+  if (!inside) {
+    selectedNotes.value.length = 0
+    selectedBoards.value.length = 0
   }
-
-  const onMouseUp = async () => {
-    window.removeEventListener('mousemove', onMouseMove)
-    window.removeEventListener('mouseup', onMouseUp)
-    await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
-      width: note.width,
-      height: note.height,
-    })
-  }
-
-  window.addEventListener('mousemove', onMouseMove)
-  window.addEventListener('mouseup', onMouseUp)
 }
 
-// ⌨️ Bezárás ESC-re
-window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    emojiMenu.value.visible = false
+// — ESC & SETTINGS —
+function onKeyDownEsc(e) {
+  if (e.key === 'Escape') emojiMenu.value.visible = false
+}
+
+function openSettings() {
+  alert('⚙️ Beállítások még nincsenek – dolgozhatunk rajta 😊')
+}
+
+// — BETÖLTÉS & ŐRZÉS —
+async function fetchBoardWithAncestors(id) {
+  boardAncestors.value = []
+  let cur = id
+  while (cur) {
+    const res = await axios.get(`http://127.0.0.1:8000/api/boards/${cur}/`)
+    boardAncestors.value.unshift(res.data)
+    cur = res.data.parent
   }
+  // dupla végpont kiszűrése
+  if (boardAncestors.value.length > 1) {
+    const lastTwo = boardAncestors.value.slice(-2)
+    if (lastTwo[0].id === lastTwo[1].id) boardAncestors.value.pop()
+  }
+  board.value = boardAncestors.value.at(-1) || {}
+}
+
+onMounted(async () => {
+  await fetchBoardWithAncestors(route.params.id)
+  const [notesData, boardsData] = await Promise.all([
+    axios.get('http://127.0.0.1:8000/api/notes/'),
+    axios.get('http://127.0.0.1:8000/api/boards/'),
+  ])
+  allNotes.value = notesData.data.map((n) => ({ ...n, editing: false }))
+  allBoards.value = boardsData.data.map((b) => ({ ...b, editing: false }))
+
+  window.addEventListener('keydown', handleKeyDown)
+  window.addEventListener('keydown', onKeyDownEsc)
+  window.addEventListener('click', handleGlobalClick)
+  window.addEventListener('keydown', onKeyDownGlobal)
 })
 
-const openSettings = () => {
-  alert('⚙️ Beállítások még nincsenek – de dolgozhatunk rajta 😄')
-}
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleKeyDown)
+  window.removeEventListener('keydown', onKeyDownEsc)
+  window.removeEventListener('click', handleGlobalClick)
+  window.removeEventListener('keydown', onKeyDownGlobal)
+})
 
 watch(
   () => route.params.id,
   async (newId) => {
     await fetchBoardWithAncestors(newId)
-    selectedNotes.value = []
-    selectedBoards.value = []
+    selectedNotes.value.length = 0
+    selectedBoards.value.length = 0
   },
 )
+function onKeyDownGlobal(e) {
+  // törléseddel már van handleKeyDown: kiegészítjük
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+    e.preventDefault()
+    // minden jegyzet és board
+    selectedNotes.value = [...notes.value]
+    selectedBoards.value = [...children.value]
+  }
+}
 </script>
 
 <style scoped>
@@ -913,6 +808,10 @@ input.mixed {
   box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.3);
 }
 .sticky-note.dragging {
+  opacity: 0.7;
+  cursor: grabbing;
+}
+.board-wrapper.dragging {
   opacity: 0.7;
   cursor: grabbing;
 }
