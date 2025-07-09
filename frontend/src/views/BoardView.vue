@@ -77,8 +77,16 @@
       </template>
     </div>
     <!-- Main -->
-    <div style="flex: 1; padding-left: 16px">
+    <div style="flex: 1; padding-left: 16px" @mousedown="startLasso" ref="boardArea">
       <section>
+        <svg class="lasso-box" v-if="isLassoing">
+          <rect
+            :x="lassoRect.x"
+            :y="lassoRect.y"
+            :width="lassoRect.width"
+            :height="lassoRect.height"
+          />
+        </svg>
         <div
           v-for="note in notes"
           :key="note.id"
@@ -156,13 +164,14 @@
   </div>
 </template>
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import axios from 'axios'
+import { useApi } from '@/composables/useApi'
 
 // — ROUTER —
 const route = useRoute()
 const router = useRouter()
+const api = useApi()
 const goToBoard = (id) => {
   if (route.params.id !== String(id)) {
     router.push(`/boards/${id}`)
@@ -172,6 +181,7 @@ const goToBoard = (id) => {
 // — ÁLLAPOTOK & REFS —
 const boardAncestors = ref([])
 const board = ref({})
+const boardArea = ref(null)
 const allNotes = ref([])
 const allBoards = ref([])
 
@@ -184,11 +194,15 @@ const selectedNotes = ref([])
 const selectedBoards = ref([])
 const draggedNotes = ref([])
 const draggedBoards = ref([])
+const dragHappened = ref(false)
 
 const dragOffsetMap = new Map()
 const boardOffsetMap = new Map()
 const titleInputs = {} // ref-ek a board-cím inputokhoz
 const emojiMenu = ref({ visible: false, x: 0, y: 0, board: null })
+const isLassoing = ref(false)
+const lassoStart = ref({ x: 0, y: 0 })
+const lassoEnd = ref({ x: 0, y: 0 })
 
 // — KONSTANSOK & HELPEREK —
 const availableIcons = [
@@ -236,6 +250,15 @@ const hasMixedColors = computed(() => {
   return selectedNotes.value.some((n) => n.background_color !== base)
 })
 
+const lassoRect = computed(() => {
+  if (!isLassoing.value) return { x: 0, y: 0, width: 0, height: 0 }
+  const x = Math.min(lassoStart.value.x, lassoEnd.value.x)
+  const y = Math.min(lassoStart.value.y, lassoEnd.value.y)
+  const width = Math.abs(lassoStart.value.x - lassoEnd.value.x)
+  const height = Math.abs(lassoStart.value.y - lassoEnd.value.y)
+  return { x, y, width, height }
+})
+
 // — TEMPLATE‐HELPEREK —
 const getNoteCount = (id) => allNotes.value.filter((n) => n.board === id).length
 
@@ -245,6 +268,10 @@ const getFileCount = () => 0 // majd docs‐számítás
 
 // — KIJELÖLÉS —
 function toggleNoteSelection(note, e) {
+  if (dragHappened.value) {
+    dragHappened.value = false
+    return
+  }
   const isMulti = e.ctrlKey || e.metaKey
   const exists = selectedNotes.value.some((n) => n.id === note.id)
 
@@ -259,6 +286,10 @@ function toggleNoteSelection(note, e) {
 }
 
 function toggleBoardSelection(brd, e) {
+  if (dragHappened.value) {
+    dragHappened.value = false
+    return
+  }
   const isMulti = e.ctrlKey || e.metaKey
   const exists = selectedBoards.value.some((b) => b.id === brd.id)
 
@@ -272,9 +303,82 @@ function toggleBoardSelection(brd, e) {
   }
 }
 
+function startLasso(e) {
+  // Csak akkor induljon a lasszó, ha a háttérre kattintunk
+  if (e.target.closest('.sticky-note, .board-wrapper')) {
+    return
+  }
+
+  isLassoing.value = true
+  const rect = boardArea.value.getBoundingClientRect()
+  lassoStart.value = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  lassoEnd.value = { ...lassoStart.value }
+
+  // Kezdetben töröljük a kijelölést, ha nem használunk multi-select modifiert
+  if (!e.ctrlKey && !e.metaKey) {
+    selectedNotes.value = []
+    selectedBoards.value = []
+  }
+
+  window.addEventListener('mousemove', onLasso)
+  window.addEventListener('mouseup', stopLasso, { once: true })
+}
+
+function onLasso(e) {
+  if (!isLassoing.value) return
+  const rect = boardArea.value.getBoundingClientRect()
+  lassoEnd.value = {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top,
+  }
+  updateSelectionWithLasso()
+}
+
+function stopLasso() {
+  isLassoing.value = false
+  window.removeEventListener('mousemove', onLasso)
+}
+
+function updateSelectionWithLasso() {
+  const lasso = lassoRect.value
+  const newSelectedNotes = []
+  const newSelectedBoards = []
+
+  notes.value.forEach((note) => {
+    const itemRect = {
+      x: note.position_x,
+      y: note.position_y,
+      width: note.width,
+      height: note.height,
+    }
+    if (rectsIntersect(lasso, itemRect)) {
+      newSelectedNotes.push(note)
+    }
+  })
+
+  children.value.forEach((board) => {
+    const itemRect = {
+      x: board.position_x,
+      y: board.position_y,
+      width: 80, // board-wrapper width
+      height: 120, // board-wrapper min-height
+    }
+    if (rectsIntersect(lasso, itemRect)) {
+      newSelectedBoards.push(board)
+    }
+  })
+
+  selectedNotes.value = newSelectedNotes
+  selectedBoards.value = newSelectedBoards
+}
+
+function rectsIntersect(r1, r2) {
+  return !(r2.x > r1.x + r1.width || r2.x + r2.width < r1.x || r2.y > r1.y + r1.height || r2.y + r2.height < r1.y)
+}
+
 // — CRUD: LÉTREHOZÁS —
 async function createNote() {
-  const res = await axios.post('http://127.0.0.1:8000/api/notes/', {
+  const res = await api.createResource('notes/', {
     board: board.value.id,
     content: 'Új jegyzet',
     position_x: snapToGrid(100),
@@ -284,11 +388,11 @@ async function createNote() {
     width: 160,
     height: 100,
   })
-  allNotes.value.push({ ...res.data, editing: true })
+  allNotes.value.push({ ...res, editing: true })
 }
 
 async function createBoard() {
-  const res = await axios.post('http://127.0.0.1:8000/api/boards/', {
+  const res = await api.createResource('boards/', {
     title: 'Új board',
     parent: board.value.id || null,
     user: board.value.user,
@@ -296,17 +400,16 @@ async function createBoard() {
     position_x: snapToGrid(200),
     position_y: snapToGrid(150),
   })
-  allBoards.value.push({ ...res.data, editing: false })
+  allBoards.value.push({ ...res, editing: false })
 }
 
 async function finishEdit(note) {
   note.editing = false
-  // közvetlenül axios.patch-et használunk:
-  await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, { content: note.content })
+  await api.updateResource(`notes/${note.id}/`, { content: note.content })
 }
 
 async function createDocument() {
-  await axios.post('http://127.0.0.1:8000/api/documents/', {
+  await api.createResource('documents/', {
     board: board.value.id,
     title: 'Új dokumentum',
     content: '',
@@ -316,7 +419,7 @@ async function createDocument() {
 
 // — CRUD: FRISSÍTÉS —
 async function updateNoteStyle(note) {
-  await axios.patch(`http://127.0.0.1:8000/api/notes/${note.id}/`, {
+  await api.updateResource(`notes/${note.id}/`, {
     background_color: note.background_color,
     text_color: note.text_color,
   })
@@ -324,9 +427,7 @@ async function updateNoteStyle(note) {
 
 async function updateBoardIcon(brd, icon) {
   brd.emoji = icon
-  await axios.patch(`http://127.0.0.1:8000/api/boards/${brd.id}/`, {
-    emoji: icon,
-  })
+  await api.updateResource(`boards/${brd.id}/`, { emoji: icon })
 }
 
 // — DRAG & DROP: JEGYZET & BOARD EGYBE —
@@ -360,12 +461,9 @@ function startUnifiedDrag(item, e) {
   window.addEventListener('mousemove', onUnifiedDrag)
   window.addEventListener('mouseup', stopUnifiedDrag)
 }
-const updateResource = async (endpoint, payload) => {
-  const res = await api.patch(endpoint, payload)
-  return res.data
-}
 
 function onUnifiedDrag(e) {
+  dragHappened.value = true
   draggedNotes.value.forEach((n) => {
     const off = dragOffsetMap.get(`note-${n.id}`)
     if (!off) return
@@ -383,13 +481,13 @@ function onUnifiedDrag(e) {
 async function stopUnifiedDrag() {
   await Promise.all([
     ...draggedNotes.value.map((n) =>
-      axios.patch(`http://127.0.0.1:8000/api/notes/${n.id}/`, {
+      api.updateResource(`notes/${n.id}/`, {
         position_x: n.position_x,
         position_y: n.position_y,
       }),
     ),
     ...draggedBoards.value.map((b) =>
-      axios.patch(`http://127.0.0.1:8000/api/boards/${b.id}/`, {
+      api.updateResource(`boards/${b.id}/`, {
         position_x: b.position_x,
         position_y: b.position_y,
       }),
@@ -412,8 +510,8 @@ async function handleKeyDown(e) {
   if (!total || !confirm(`Biztos törlöd a ${total} elemet?`)) return
 
   await Promise.all([
-    ...selectedNotes.value.map((n) => axios.delete(`http://127.0.0.1:8000/api/notes/${n.id}/`)),
-    ...selectedBoards.value.map((b) => axios.delete(`http://127.0.0.1:8000/api/boards/${b.id}/`)),
+    ...selectedNotes.value.map((n) => api.deleteResource(`notes/${n.id}/`)),
+    ...selectedBoards.value.map((b) => api.deleteResource(`boards/${b.id}/`)),
   ])
 
   allNotes.value = allNotes.value.filter((n) => !selectedNotes.value.includes(n))
@@ -446,9 +544,9 @@ async function fetchBoardWithAncestors(id) {
   boardAncestors.value = []
   let cur = id
   while (cur) {
-    const res = await axios.get(`http://127.0.0.1:8000/api/boards/${cur}/`)
-    boardAncestors.value.unshift(res.data)
-    cur = res.data.parent
+    const boardData = await api.fetchResource(`boards/${cur}/`)
+    boardAncestors.value.unshift(boardData)
+    cur = boardData.parent
   }
   // dupla végpont kiszűrése
   if (boardAncestors.value.length > 1) {
@@ -461,11 +559,11 @@ async function fetchBoardWithAncestors(id) {
 onMounted(async () => {
   await fetchBoardWithAncestors(route.params.id)
   const [notesData, boardsData] = await Promise.all([
-    axios.get('http://127.0.0.1:8000/api/notes/'),
-    axios.get('http://127.0.0.1:8000/api/boards/'),
+    api.fetchResource('notes/'),
+    api.fetchResource('boards/'),
   ])
-  allNotes.value = notesData.data.map((n) => ({ ...n, editing: false }))
-  allBoards.value = boardsData.data.map((b) => ({ ...b, editing: false }))
+  allNotes.value = notesData.map((n) => ({ ...n, editing: false }))
+  allBoards.value = boardsData.map((b) => ({ ...b, editing: false }))
 
   window.addEventListener('keydown', handleKeyDown)
   window.addEventListener('keydown', onKeyDownEsc)
@@ -814,5 +912,20 @@ input.mixed {
 .board-wrapper.dragging {
   opacity: 0.7;
   cursor: grabbing;
+}
+.lasso-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.lasso-box rect {
+  fill: rgba(0, 123, 255, 0.2);
+  stroke: rgba(0, 123, 255, 0.8);
+  stroke-width: 1px;
 }
 </style>
