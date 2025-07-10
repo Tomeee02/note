@@ -1,1 +1,1 @@
-AM git_changes.txt
+ M git_changes.txt
