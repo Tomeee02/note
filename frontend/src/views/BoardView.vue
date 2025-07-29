@@ -373,7 +373,12 @@ function updateSelectionWithLasso() {
 }
 
 function rectsIntersect(r1, r2) {
-  return !(r2.x > r1.x + r1.width || r2.x + r2.width < r1.x || r2.y > r1.y + r1.height || r2.y + r2.height < r1.y)
+  return !(
+    r2.x > r1.x + r1.width ||
+    r2.x + r2.width < r1.x ||
+    r2.y > r1.y + r1.height ||
+    r2.y + r2.height < r1.y
+  )
 }
 
 // — CRUD: LÉTREHOZÁS —
@@ -430,36 +435,48 @@ async function updateBoardIcon(brd, icon) {
   await api.updateResource(`boards/${brd.id}/`, { emoji: icon })
 }
 
-// — DRAG & DROP: JEGYZET & BOARD EGYBE —
 function startUnifiedDrag(item, e) {
+  // Detect a note by the presence of `content`
   const isNote = 'content' in item
-  const isBoard = 'emoji' in item
 
-  draggedNotes.value = selectedNotes.value.length ? [...selectedNotes.value] : isNote ? [item] : []
+  // Check if this item is already in the current selection
+  const inSelection = isNote
+    ? selectedNotes.value.some((n) => n.id === item.id)
+    : selectedBoards.value.some((b) => b.id === item.id)
 
-  draggedBoards.value = selectedBoards.value.length
-    ? [...selectedBoards.value]
-    : isBoard
-      ? [item]
-      : []
+  // If it isn’t selected, bail out and let your click handler do its thing
+  if (!inSelection) {
+    dragHappened.value = false
+    return
+  }
+
+  dragHappened.value = true
+  draggedNotes.value = [...selectedNotes.value]
+  draggedBoards.value = [...selectedBoards.value]
 
   dragOffsetMap.clear()
+  boardOffsetMap.clear()
+
+  const { left, top } = boardArea.value.getBoundingClientRect()
+
+  // Build up offsets for notes
   draggedNotes.value.forEach((n) => {
-    dragOffsetMap.set(`note-${n.id}`, {
-      x: e.clientX - n.position_x,
-      y: e.clientY - n.position_y,
+    dragOffsetMap.set(n.id, {
+      x: e.clientX - left - n.position_x,
+      y: e.clientY - top - n.position_y,
     })
   })
-  boardOffsetMap.clear()
+
+  // Build up offsets for boards
   draggedBoards.value.forEach((b) => {
     boardOffsetMap.set(b.id, {
-      x: e.clientX - b.position_x,
-      y: e.clientY - b.position_y,
+      x: e.clientX - left - b.position_x,
+      y: e.clientY - top - b.position_y,
     })
   })
 
   window.addEventListener('mousemove', onUnifiedDrag)
-  window.addEventListener('mouseup', stopUnifiedDrag)
+  window.addEventListener('mouseup', stopUnifiedDrag, { once: true })
 }
 
 function onUnifiedDrag(e) {
